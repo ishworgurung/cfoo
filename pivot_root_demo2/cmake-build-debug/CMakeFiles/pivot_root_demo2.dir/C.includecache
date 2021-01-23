@@ -1,0 +1,32 @@
+#IncludeRegexLine: ^[ 	]*[#%][ 	]*(include|import)[ 	]*[<"]([^">]+)([">])
+
+#IncludeRegexScan: ^.*$
+
+#IncludeRegexComplain: ^$
+
+#IncludeRegexTransform: 
+
+/home/isg/hacks/src/ishworgurung/cfoo/pivot_root_demo2/main.c
+sched.h
+-
+stdio.h
+-
+stdlib.h
+-
+unistd.h
+-
+sys/wait.h
+-
+sys/syscall.h
+-
+sys/mount.h
+-
+sys/stat.h
+-
+limits.h
+-
+sys/mman.h
+-
+string.h
+-
+
