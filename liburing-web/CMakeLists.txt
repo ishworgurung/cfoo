@@ -1,0 +1,12 @@
+cmake_minimum_required(VERSION 3.17)
+project(liburing_web C)
+set(CMAKE_C_STANDARD 11)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBURING REQUIRED liburing)
+add_executable(liburing_web main.c const.h http_request.h helper.c)
+#static linking
+#target_link_libraries(liburing_web /usr/lib/liburing.a)
+target_link_libraries(liburing_web PUBLIC ${LIBURING_LIBRARIES})
+target_include_directories(liburing_web PUBLIC ${LIBURING_INCLUDE_DIRS})
+target_compile_options(liburing_web PUBLIC ${LIBURING_CFLAGS_OTHER})
+#set(CMAKE_EXE_LINKER_FLAGS "-static-libgcc -static-libstdc++ /usr/lib/liburing.a")
