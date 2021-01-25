@@ -27,11 +27,11 @@ enum {
     PROV_BUF,
 };
 
-typedef struct conn_info {
+typedef struct connection {
     unsigned int fd;
     unsigned short type;
     unsigned short bid;
-} conn_info;
+} connection;
 
 char bufs[BUFFERS_COUNT][MAX_MESSAGE_LEN] = {0};
 int group_id = 1337;
@@ -79,7 +79,7 @@ int main(int argc, char *argv[]) {
     }
 
     // check if IORING_FEAT_FAST_POLL is supported
-    if (!(params.features & IORING_FEAT_FAST_POLL)) {
+    if ((params.features & IORING_FEAT_FAST_POLL) == 0x1) {
         printf("IORING_FEAT_FAST_POLL not available in the kernel, quiting...\n");
         exit(0);
     }
@@ -114,28 +114,28 @@ int main(int argc, char *argv[]) {
     // start event loop
     while (1) {
         io_uring_submit_and_wait(&ring, 1);
-        struct io_uring_cqe *cqe;
+        struct io_uring_cqe *ev_cqe;
         unsigned int head;
         unsigned int count = 0;
 
         // go through all CQEs
-        io_uring_for_each_cqe(&ring, head, cqe) {
+        io_uring_for_each_cqe(&ring, head, ev_cqe) {
             ++count;
-            struct conn_info conn_i;
-            memcpy(&conn_i, &cqe->user_data, sizeof(conn_i));
+            struct connection conn_i;
+            memcpy(&conn_i, &ev_cqe->user_data, sizeof(conn_i));
 
             int type = conn_i.type;
-            if (cqe->res == -ENOBUFS) {
+            if (ev_cqe->res == -ENOBUFS) {
                 fprintf(stdout, "bufs in automatic buffer selection empty, this should not happen...\n");
                 fflush(stdout);
                 exit(1);
             } else if (type == PROV_BUF) {
-                if (cqe->res < 0) {
-                    printf("cqe->res = %d\n", cqe->res);
+                if (ev_cqe->res < 0) {
+                    printf("cqe->res = %d\n", ev_cqe->res);
                     exit(1);
                 }
             } else if (type == ACCEPT) {
-                int sock_conn_fd = cqe->res;
+                int sock_conn_fd = ev_cqe->res;
                 // only read when there is no error, >= 0
                 if (sock_conn_fd >= 0) {
                     add_socket_read(&ring, sock_conn_fd, group_id, MAX_MESSAGE_LEN, IOSQE_BUFFER_SELECT);
@@ -144,13 +144,13 @@ int main(int argc, char *argv[]) {
                 // new connected client; read data from socket and re-add accept to monitor for new connections
                 add_socket_accept(&ring, sock_listen_fd, (struct sockaddr *)&client_addr, &client_len, 0);
             } else if (type == READ) {
-                int bytes_read = cqe->res;
-                if (cqe->res <= 0) {
+                int bytes_read = ev_cqe->res;
+                if (ev_cqe->res <= 0) {
                     // connection closed or error
                     shutdown(conn_i.fd, SHUT_RDWR);
                 } else {
                     // bytes have been read into bufs, now add write to socket sqe
-                    int bid = cqe->flags >> 16;
+                    int bid = ev_cqe->flags >> 16;
                     add_socket_write(&ring, conn_i.fd, bid, bytes_read, 0);
                 }
             } else if (type == WRITE) {
@@ -166,11 +166,13 @@ int main(int argc, char *argv[]) {
 }
 
 void add_socket_accept(struct io_uring *ring, int fd, struct sockaddr *client_addr, socklen_t *client_len, unsigned flags) {
-    struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
+    struct io_uring_sqe *sqe;
+
+    sqe = io_uring_get_sqe(ring);
     io_uring_prep_accept(sqe, fd, client_addr, client_len, 0);
     io_uring_sqe_set_flags(sqe, flags);
 
-    conn_info conn_i = {
+    connection conn_i = {
         .fd = fd,
         .type = ACCEPT,
     };
@@ -178,12 +180,14 @@ void add_socket_accept(struct io_uring *ring, int fd, struct sockaddr *client_ad
 }
 
 void add_socket_read(struct io_uring *ring, int fd, unsigned gid, size_t message_size, unsigned flags) {
-    struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
+    struct io_uring_sqe *sqe;
+
+    sqe = io_uring_get_sqe(ring);
     io_uring_prep_recv(sqe, fd, NULL, message_size, 0);
     io_uring_sqe_set_flags(sqe, flags);
     sqe->buf_group = gid;
 
-    conn_info conn_i = {
+    connection conn_i = {
         .fd = fd,
         .type = READ,
     };
@@ -191,11 +195,13 @@ void add_socket_read(struct io_uring *ring, int fd, unsigned gid, size_t message
 }
 
 void add_socket_write(struct io_uring *ring, int fd, unsigned short bid, size_t message_size, unsigned flags) {
-    struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
+    struct io_uring_sqe *sqe;
+
+    sqe = io_uring_get_sqe(ring);
     io_uring_prep_send(sqe, fd, &bufs[bid], message_size, 0);
     io_uring_sqe_set_flags(sqe, flags);
 
-    conn_info conn_i = {
+    connection conn_i = {
         .fd = fd,
         .type = WRITE,
         .bid = bid,
@@ -204,10 +210,12 @@ void add_socket_write(struct io_uring *ring, int fd, unsigned short bid, size_t 
 }
 
 void add_provide_buf(struct io_uring *ring, unsigned short bid, unsigned gid) {
-    struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
+    struct io_uring_sqe *sqe;
+
+    sqe = io_uring_get_sqe(ring);
     io_uring_prep_provide_buffers(sqe, bufs[bid], MAX_MESSAGE_LEN, 1, gid, bid);
 
-    conn_info conn_i = {
+    connection conn_i = {
         .fd = 0,
         .type = PROV_BUF,
     };
