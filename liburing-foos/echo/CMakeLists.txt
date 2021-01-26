@@ -10,7 +10,7 @@ pkg_check_modules(LIBURING REQUIRED liburing)
 
 add_executable(echo
         CMakeLists.txt
-        main.c)
+        main.c defs.h)
 
 #static linking
 #target_link_libraries(liburing_web /usr/lib/liburing.a)

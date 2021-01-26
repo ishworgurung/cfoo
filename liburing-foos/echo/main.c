@@ -9,32 +9,14 @@
 #include <sys/socket.h>
 
 #include <liburing.h>
+#include "defs.h"
 
-#define MAX_CONNECTIONS     4096
-#define BACKLOG             512
-#define MAX_MESSAGE_LEN     2048
-#define BUFFERS_COUNT       MAX_CONNECTIONS
-
-void add_socket_accept(struct io_uring *ring, int fd, struct sockaddr *client_addr, socklen_t *client_len, unsigned flags);
-void add_socket_read(struct io_uring *ring, int fd, unsigned gid, size_t size, unsigned flags);
-void add_socket_write(struct io_uring *ring, int fd, unsigned short bid, size_t size, unsigned flags);
-void add_provide_buffers(struct io_uring *ring, unsigned short bid, unsigned gid);
-
-enum {
-    ACCEPT,
-    READ,
-    WRITE,
-    PROV_BUF,
-};
-
-typedef struct connection {
-    unsigned int fd;
-    unsigned short type;
-    unsigned short bid;
-} connection;
-
+// buffer used in io_uring buffer selection
 char buf[BUFFERS_COUNT][MAX_MESSAGE_LEN] = {0};
+// buffer group ID used in io_uring buffer selection
 int buffer_group_id = 1337;
+// queue depth using in io_uring
+unsigned int QD = 128;
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
@@ -42,18 +24,28 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
-    int port_num = strtol(argv[1], NULL, 10);
+    int port_num;
+    struct sockaddr_in serv_addr, client_addr;
+    socklen_t client_len;
+    int sock_listen_fd;
+    const int opt_val = 0x1;
+    struct io_uring_params uring_params;
+    struct io_uring ring;
+    struct io_uring_probe *probe;
+    struct io_uring_sqe *sqe;
+    struct io_uring_cqe *cqe;
+
+    port_num = strtol(argv[1], NULL, 10);
     if (!port_num) {
         printf("%s\n", "Please provide a valid port (0-65535)");
         exit(1);
     }
-    struct sockaddr_in serv_addr, client_addr;
-    socklen_t client_len = sizeof(client_addr);
 
-    // setup socket
-    int sock_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    const int val = 1;
-    setsockopt(sock_listen_fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val));
+    client_len = sizeof(client_addr);
+    // setup listening socket
+    sock_listen_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    setsockopt(sock_listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt_val, sizeof(opt_val));
+    setsockopt(sock_listen_fd, SOL_SOCKET, SO_REUSEPORT, &opt_val, sizeof(opt_val));
 
     memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
@@ -72,37 +64,31 @@ int main(int argc, char *argv[]) {
     printf("io_uring echo server listening for connections on port: %d\n", port_num);
 
     // initialize io_uring
-    struct io_uring_params params;
-    struct io_uring ring;
-    memset(&params, 0, sizeof(params));
+    memset(&uring_params, 0, sizeof(uring_params));
 
-    if (io_uring_queue_init_params(128, &ring, &params) < 0) {
-        perror("io_uring_init_failed...\n");
+    if (io_uring_queue_init_params(QD, &ring, &uring_params) < 0) {
+        perror("io_uring_queue_init_params failed: \n");
         exit(1);
     }
 
     // check if IORING_FEAT_FAST_POLL is supported
-    if (!(params.features & IORING_FEAT_FAST_POLL)) {
-        printf("IORING_FEAT_FAST_POLL not available in the kernel, quiting...\n");
+    if (!(uring_params.features & IORING_FEAT_FAST_POLL)) {
+        printf("IORING_FEAT_FAST_POLL is not available in the kernel, quiting...\n");
         exit(0);
     }
 
     // check if buffer selection is supported
-    struct io_uring_probe *probe;
     probe = io_uring_get_probe_ring(&ring);
     if (!probe ||
         !io_uring_opcode_supported(probe, IORING_OP_PROVIDE_BUFFERS) ||
         !io_uring_opcode_supported(probe, IORING_OP_REMOVE_BUFFERS)) {
 
-        printf("Buffer selection not supported, exiting...\n");
+        printf("Buffer selection is not supported, exiting...\n");
         exit(0);
     }
     free(probe);
 
     // register buffers for buffer selection
-    struct io_uring_sqe *sqe;
-    struct io_uring_cqe *cqe;
-
     sqe = io_uring_get_sqe(&ring);
     // initialise buffer selection
     io_uring_prep_provide_buffers(sqe, buf, MAX_MESSAGE_LEN, BUFFERS_COUNT, buffer_group_id, 0);
@@ -128,12 +114,12 @@ int main(int argc, char *argv[]) {
         // go through all CQEs
         io_uring_for_each_cqe(&ring, head, ev_cqe) {
             ++count;
-            struct connection conn_i;
+            connection conn_i;
             memcpy(&conn_i, &ev_cqe->user_data, sizeof(conn_i));
 
             int type = conn_i.type;
             if (ev_cqe->res == -ENOBUFS) {
-                fprintf(stdout, "buf in automatic buffer selection empty, this should not happen...\n");
+                fprintf(stdout, "buffer in automatic buffer selection empty, this should not happen...\n");
                 fflush(stdout);
                 exit(1);
             } else if (type == PROV_BUF) {
@@ -154,7 +140,6 @@ int main(int argc, char *argv[]) {
                 if (ev_cqe->res <= 0) {
                     // de-initialise buffer selection
                     io_uring_prep_remove_buffers(sqe, 1, buffer_group_id);
-                    printf("done");
                     // connection closed or error
                     if (shutdown(conn_i.fd, SHUT_RDWR) < 0) {
                         printf("shutdown failed");
@@ -176,7 +161,7 @@ int main(int argc, char *argv[]) {
     }
 }
 
-void add_socket_accept(struct io_uring *ring, int fd, struct sockaddr *client_addr, socklen_t *client_len, unsigned flags) {
+static inline void add_socket_accept(struct io_uring *ring, int fd, struct sockaddr *client_addr, socklen_t *client_len, unsigned flags) {
     struct io_uring_sqe *sqe;
 
     sqe = io_uring_get_sqe(ring);
@@ -190,7 +175,7 @@ void add_socket_accept(struct io_uring *ring, int fd, struct sockaddr *client_ad
     memcpy(&sqe->user_data, &conn_i, sizeof(conn_i));
 }
 
-void add_socket_read(struct io_uring *ring, int fd, unsigned gid, size_t message_size, unsigned flags) {
+static inline void add_socket_read(struct io_uring *ring, int fd, unsigned gid, size_t message_size, unsigned flags) {
     struct io_uring_sqe *sqe;
 
     sqe = io_uring_get_sqe(ring);
@@ -205,7 +190,7 @@ void add_socket_read(struct io_uring *ring, int fd, unsigned gid, size_t message
     memcpy(&sqe->user_data, &conn_i, sizeof(conn_i));
 }
 
-void add_socket_write(struct io_uring *ring, int fd, unsigned short bid, size_t message_size, unsigned flags) {
+static inline void add_socket_write(struct io_uring *ring, int fd, unsigned short bid, size_t message_size, unsigned flags) {
     struct io_uring_sqe *sqe;
 
     sqe = io_uring_get_sqe(ring);
@@ -220,7 +205,7 @@ void add_socket_write(struct io_uring *ring, int fd, unsigned short bid, size_t 
     memcpy(&sqe->user_data, &conn_i, sizeof(conn_i));
 }
 
-void add_provide_buffers(struct io_uring *ring, unsigned short bid, unsigned gid) {
+static inline void add_provide_buffers(struct io_uring *ring, unsigned short bid, unsigned gid) {
     struct io_uring_sqe *sqe;
 
     sqe = io_uring_get_sqe(ring);
