@@ -1,5 +1,3 @@
-
-
 #define MAX_CONNECTIONS     4096
 #define BACKLOG             20480
 #define MAX_MESSAGE_LEN     2048
